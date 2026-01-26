@@ -302,19 +302,11 @@ CLUES: [总结已知信息]
 
     def _generate_final_summary(self, question, clues, history: str = ""):
         """当检索耗尽仍未找到确切答案时，基于线索总结"""
-        prompt = f"""
-[历史对话]
-{history if history else "无"}
-
-用户问题：{question}
-已收集的线索：
-{clues}
-
-请基于上述线索，尝试回答问题。
-重要原则：
-1. 如果根据线索可以回答问题，请提供直接的答案。
-2. 如果线索不足以回答，或者找不到相关信息，请严格只回答一句："根据知识库内容无法提供回答"，不要包含"已知相关信息"、"结论"或其他解释。
-"""
+        prompt = Prompts.RAG_SUMMARY.format(
+            history=history if history else "无",
+            question=question,
+            clues=clues
+        )
         return self.llm.invoke(prompt).content
 
     def _fallback_response(self, msg, timing):

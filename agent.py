@@ -87,22 +87,10 @@ class RAGAgent:
         返回: 'SQL' 或 'RAG'
         """
         with self.phase_logger.phase("意图识别"):
-            prompt = f"""
-你是一个智能意图识别助手。当前服务的业务场景为：【{self.scenario}】。
-请根据该场景背景，判断用户问题的类型。
-
-用户问题: {question}
-
-类型定义：
-1. SQL (结构化查询): 涉及对数据库中具体字段的统计、计算、排序或精确筛选。
-    - 特征：通常包含"多少"、"总和"、"平均"、"最大/最小"、"大于/小于"、"列出...的详情"等明确的数据操作指令，或者**查询特定实体的属性值**。
-    - 示例："{self.scenario}中有多少条记录？"、"统计各部门人数"、"列出价格高于100的产品"、"张三的邮箱是什么"。
- 2. RAG (知识检索): 涉及对非结构化文档、描述性文本或背景知识的查询。
-    - 特征：通常询问"是什么"、"介绍一下"、"背景"、"流程"、"原因"等语义理解类问题。
-    - 示例："介绍一下项目背景"、"如何处理退款流程"、"某人的主要职责是什么"。
-
-请只返回类型名称（SQL 或 RAG），不要包含其他文字。
-"""
+            prompt = Prompts.INTENT_CLASSIFICATION.format(
+                scenario=self.scenario,
+                question=question
+            )
             try:
                 response = self.llm.invoke(prompt)
                 intent = response.content.strip().upper()

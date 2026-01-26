@@ -1,0 +1,443 @@
+import os
+import sys
+import json
+import logging
+import uuid
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
+import openpyxl
+from openpyxl.utils import range_boundaries
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+
+from config import Prompts, MASTER_JSON_PATH
+
+# --- 配置区域 ---
+LM_STUDIO_API_BASE = "http://192.168.30.190:1234/v1"
+LM_STUDIO_API_KEY = "lm-studio"
+MODEL_NAME = "qwen/qwen3-4b-2507"
+TEMPERATURE = 0.1
+MAX_TOKENS = 32000
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('excel_agent.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class ExcelProcessingAgent:
+    """
+    基于LLM的Excel智能处理Agent
+    负责：表头识别（LLM）、合并单元格处理、数据分块、JSON转换与持久化（Python）
+    """
+    
+    def __init__(self):
+        self.llm = self._get_llm_client()
+        self.output_file = Path(MASTER_JSON_PATH)
+        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize master file if not exists
+        if not self.output_file.exists():
+            with open(self.output_file, 'w', encoding='utf-8') as f:
+                f.write("[]")
+                
+        self.existing_doc_ids = self._load_existing_doc_ids()
+        logger.info(f"Agent 初始化完成，统一输出文件: {self.output_file}")
+
+    def _load_existing_doc_ids(self) -> set:
+        """Load existing doc_ids to avoid duplicates"""
+        if not self.output_file.exists():
+            return set()
+        try:
+            with open(self.output_file, 'r', encoding='utf-8') as f:
+                # Handle empty file
+                content = f.read().strip()
+                if not content:
+                    return set()
+                data = json.loads(content)
+                
+                doc_ids = set()
+                if isinstance(data, list):
+                    for item in data:
+                        for val in item.values():
+                            if isinstance(val, dict) and "doc_id" in val:
+                                doc_ids.add(val["doc_id"])
+                return doc_ids
+        except Exception as e:
+            logger.warning(f"Failed to load existing doc_ids: {e}")
+            return set()
+
+    def _get_llm_client(self) -> ChatOpenAI:
+        """初始化 LangChain 客户端"""
+        return ChatOpenAI(
+            model=MODEL_NAME,
+            openai_api_base=LM_STUDIO_API_BASE,
+            openai_api_key=LM_STUDIO_API_KEY,
+            temperature=TEMPERATURE,
+            max_tokens=None if MAX_TOKENS == -1 else MAX_TOKENS
+        )
+
+    def identify_header_row(self, sheet, sheet_name: str) -> int:
+        """
+        【表头识别Agent】 - 保留使用LLM识别
+        截取前20行，询问LLM哪一行是表头
+        """
+        logger.info(f"正在识别工作表 '{sheet_name}' 的表头...")
+        
+        # 1. 获取前20行数据预览
+        preview_rows = []
+        for i, row in enumerate(sheet.iter_rows(min_row=1, max_row=20, values_only=True)):
+            if any(cell is not None for cell in row):
+                preview_rows.append(f"行号 {i}: {list(row)}")
+        
+        preview_text = "\n".join(preview_rows)
+        
+        # 2. 构造提示词
+        prompt = f"""
+你是一个专业的Excel数据分析助手。请分析以下Excel工作表的前20行数据，找出包含列名（表头）的那一行。
+通常表头行包含描述性的字段名称（如"姓名"、"电话"、"地址"等）。
+
+数据预览：
+{preview_text}
+
+请直接返回表头所在的行号（从0开始计数）。
+只返回一个数字，不要包含任何其他文字或解释。
+如果无法确定，请返回 0。
+"""
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            content = response.content.strip()
+            import re
+            match = re.search(r'\d+', content)
+            if match:
+                header_index = int(match.group())
+                logger.info(f"LLM 识别表头在第 {header_index} 行")
+                return header_index
+            else:
+                logger.warning("LLM 未返回有效数字，默认使用第 0 行")
+                return 0
+        except Exception as e:
+            logger.error(f"表头识别失败: {e}，默认使用第 0 行")
+            return 0
+
+    def handle_merged_cells(self, sheet, header_row_idx: int):
+        """
+        处理合并单元格：拆分并填充值
+        """
+        logger.info("正在处理合并单元格...")
+        merged_ranges = list(sheet.merged_cells.ranges)
+        
+        for merged_range in merged_ranges:
+            min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+            top_left_cell_value = sheet.cell(row=min_row, column=min_col).value
+            
+            sheet.unmerge_cells(str(merged_range))
+            
+            # 填充值到拆分后的所有单元格
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    cell = sheet.cell(row=row, column=col)
+                    cell.value = top_left_cell_value
+
+    def unique_headers(self, headers: List[str]) -> List[str]:
+        """对表头进行去重处理，空值转为Unknown"""
+        seen = {}
+        new_headers = []
+        for h in headers:
+            h_str = str(h).strip() if h is not None else "Unknown"
+            if not h_str:  # Handle empty string
+                h_str = "Unknown"
+                
+            if h_str in seen:
+                seen[h_str] += 1
+                new_headers.append(f"{h_str}_{seen[h_str]}")
+            else:
+                seen[h_str] = 0
+                new_headers.append(h_str)
+        return new_headers
+
+    def _infer_data_type(self, value: str) -> Dict[str, Any]:
+        """
+        推断字符串值的数据类型
+        """
+        if value is None or value == "":
+            return {"value": None, "type": "null"}
+        
+        value_str = str(value).strip()
+        
+        # 尝试解析为整数
+        try:
+            if value_str.isdigit() or (value_str.startswith("-") and value_str[1:].isdigit()):
+                int_value = int(value_str)
+                return {"value": int_value, "type": "integer"}
+        except:
+            pass
+        
+        # 尝试解析为浮点数
+        try:
+            float_value = float(value_str)
+            # 检查是否为整数格式的小数
+            if float_value == int(float_value):
+                return {"value": int(float_value), "type": "integer"}
+            return {"value": float_value, "type": "float"}
+        except:
+            pass
+        
+        # 尝试解析为日期 (格式: YYYY-MM-DD, YYYY/MM/DD, YYYY-MM-DD HH:MM:SS)
+        import re
+        date_patterns = [
+            r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$',  # YYYY-MM-DD
+            r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$',  # YYYY-MM-DD HH:MM:SS
+        ]
+        for pattern in date_patterns:
+            match = re.match(pattern, value_str)
+            if match:
+                return {"value": value_str, "type": "date"}
+        
+        # 布尔值
+        if value_str.lower() in ["true", "false", "是", "否", "yes", "no"]:
+            bool_value = value_str.lower() in ["true", "是", "yes"]
+            return {"value": bool_value, "type": "boolean"}
+        
+        # 默认为字符串
+        return {"value": value_str, "type": "string"}
+
+    def process_chunk_with_python(self, headers: List[str], data_rows: List[List[Any]]) -> List[Dict]:
+        """
+        【数据转换】 - 使用Python实现（替代原来的LLM实现）
+        将数据块转换为标准JSON格式
+        """
+        result = []
+        
+        for row in data_rows:
+            item = {}
+            for i, header in enumerate(headers):
+                value = row[i] if i < len(row) else None
+                
+                # 处理空值
+                if value is None:
+                    item[header] = None
+                    continue
+                
+                # 如果已经是Python原生类型，直接使用
+                if isinstance(value, (int, float, bool)):
+                    item[header] = value
+                elif isinstance(value, datetime):
+                    item[header] = value.isoformat()
+                else:
+                    # 字符串类型，尝试推断数据类型
+                    type_info = self._infer_data_type(str(value))
+                    item[header] = type_info["value"]
+            
+            result.append(item)
+        
+        return result
+
+    def process_sheet(self, file_path: Path, wb, sheet_name: str):
+        """处理单个工作表"""
+        sheet = wb[sheet_name]
+        
+        # 1. 识别表头（保留LLM）
+        header_row_idx = self.identify_header_row(sheet, sheet_name)
+        
+        # 2. 处理合并单元格
+        self.handle_merged_cells(sheet, header_row_idx)
+        
+        # 3. 获取并清洗表头
+        header_row_values = []
+        for cell in sheet[header_row_idx + 1]:
+            header_row_values.append(cell.value)
+        
+        full_headers = self.unique_headers(header_row_values)
+        logger.info(f"原始表头: {full_headers}")
+        
+        # 清洗：找出非 'Unknown' 的列索引
+        valid_indices = []
+        cleaned_headers = []
+        for idx, h in enumerate(full_headers):
+            if not h.startswith('Unknown'):
+                valid_indices.append(idx)
+                cleaned_headers.append(h)
+                
+        logger.info(f"清洗后的表头 (保留 {len(cleaned_headers)} 列): {cleaned_headers}")
+        
+        if not cleaned_headers:
+            logger.warning(f"工作表 {sheet_name} 没有有效的表头，跳过处理")
+            return
+        
+        if not cleaned_headers:
+            logger.warning(f"工作表 {sheet_name} 没有有效的表头，跳过处理")
+            return
+        
+        # 4. 准备输出文件
+        safe_filename = file_path.stem
+        safe_sheet_name = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in sheet_name])
+        
+        # 生成确定性文档ID (基于文件名和Sheet名)
+        source_id = f"{safe_filename}_{safe_sheet_name}"
+        doc_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, source_id))
+        
+        # 检查是否已存在
+        if doc_id in self.existing_doc_ids:
+            logger.info(f"文档 {source_id} (ID: {doc_id}) 已存在于统一库中，跳过。")
+            return
+
+        # 5. 分块处理数据
+        data_start_row = header_row_idx + 2
+        
+        # 统计已保存的CHUNK数量
+        chunks_saved = 0
+        
+        row_iterator = sheet.iter_rows(min_row=data_start_row, values_only=True)
+        
+        # 批处理缓存
+        rows_buffer = []
+        
+        for row in row_iterator:
+            # 跳过全空行
+            if all(cell is None for cell in row):
+                continue
+            
+            # 提取有效列数据
+            filtered_row = [row[i] if i < len(row) else None for i in valid_indices]
+            rows_buffer.append(filtered_row)
+            
+            if len(rows_buffer) >= 10:
+                # 处理当前块（使用Python）
+                self._process_and_save_chunk(cleaned_headers, rows_buffer, doc_id, self.output_file, is_first=False) # Always append, so is_first=False generally (handled by append logic)
+                chunks_saved += 1
+                rows_buffer = []
+                logger.info(f"工作表 {sheet_name}: 已保存 {chunks_saved} 个分块")
+
+        # 处理剩余数据
+        if rows_buffer:
+            self._process_and_save_chunk(cleaned_headers, rows_buffer, doc_id, self.output_file, is_first=False)
+            chunks_saved += 1
+            
+        logger.info(f"工作表 {sheet_name} 处理完成，共保存 {chunks_saved} 个分块。")
+        # Update cache
+        self.existing_doc_ids.add(doc_id)
+
+    def _process_and_save_chunk(self, headers, rows, doc_id, output_file, is_first):
+        """生成分块结构并写入"""
+        # 1. Python转换内容（替代原来的LLM转换）
+        content_list = self.process_chunk_with_python(headers, rows)
+        
+        # 2. 生成 Chunk ID
+        chunk_id = f"chunk-{uuid.uuid4().hex}"
+        
+        # 3. 构造新结构
+        wrapper = {
+            chunk_id: {
+                "content": content_list,
+                "doc_id": doc_id,
+                "chunk_id": chunk_id
+            }
+        }
+        
+        # 4. 写入
+        self._append_json_to_file(output_file, [wrapper])
+
+    def _append_json_to_file(self, file_path, data_list, is_first_batch=False):
+        """原子追加写入JSON到统一文件"""
+        if not data_list:
+            return
+            
+        json_strings = []
+        for item in data_list:
+            json_strings.append(json.dumps(item, ensure_ascii=False, indent=2))
+            
+        content = ",\n".join(json_strings)
+        
+        try:
+            # 使用 rb+ 模式智能追加
+            with open(file_path, 'rb+') as f:
+                f.seek(0, os.SEEK_END)
+                pos = f.tell()
+                
+                if pos > 2: # File has content (at least [])
+                    # Scan backwards to find the closing bracket
+                    f.seek(-1, os.SEEK_END)
+                    while f.read(1) != b']':
+                        f.seek(-2, os.SEEK_CUR)
+                        if f.tell() == 0: break # Should not happen if valid JSON list
+                    
+                    # Found ']', move back one position to overwrite it
+                    f.seek(-1, os.SEEK_CUR)
+                    
+                    # If list is not empty (has elements), add comma
+                    # Check if previous char is '[' (empty list)
+                    current_pos = f.tell()
+                    if current_pos > 0:
+                        f.seek(current_pos - 1)
+                        char = f.read(1)
+                        if char != b'[':
+                             f.seek(current_pos)
+                             f.write(b",\n")
+                        else:
+                             f.seek(current_pos) # Reset to overwrite ]
+                    
+                    f.write(content.encode('utf-8'))
+                    f.write(b"\n]")
+                else:
+                    # File is empty or too short, initialize
+                    f.seek(0)
+                    f.write(b"[\n")
+                    f.write(content.encode('utf-8'))
+                    f.write(b"\n]")
+        except Exception as e:
+            logger.error(f"Append to master file failed: {e}")
+
+
+
+    def process_file(self, file_path_str: str):
+        """主入口：处理单个Excel文件"""
+        file_path = Path(file_path_str)
+        if not file_path.exists():
+            logger.error(f"文件不存在: {file_path}")
+            return
+
+        logger.info(f"开始处理文件: {file_path}")
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            for sheet_name in wb.sheetnames:
+                try:
+                    self.process_sheet(file_path, wb, sheet_name)
+                except Exception as e:
+                    logger.error(f"处理工作表 {sheet_name} 失败: {e}", exc_info=True)
+            wb.close()
+            logger.info(f"文件 {file_path} 处理完毕")
+        except Exception as e:
+            logger.error(f"文件加载失败: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    agent = ExcelProcessingAgent()
+    print("=== Excel 智能分块处理 Agent (RAG Optimized) ===")
+    print("表头识别：使用 LLM")
+    print("数据转换：使用 Python")
+    target_input = input("请输入Excel文件路径或文件夹路径: ").strip()
+    
+    if not target_input:
+        print("未输入路径，程序退出。")
+        sys.exit(0)
+        
+    target_path = Path(target_input)
+    if target_path.is_file():
+        agent.process_file(str(target_path))
+    elif target_path.is_dir():
+        excel_files = list(target_path.rglob("*.xlsx"))
+        print(f"找到 {len(excel_files)} 个Excel文件。")
+        for f in excel_files:
+            if not f.name.startswith("~$"):
+                agent.process_file(str(f))
+    else:
+        print("无效的路径。")

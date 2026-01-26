@@ -173,16 +173,9 @@ SQL语句:
         return sql
 
     def _generate_answer(self, question: str, sql: str, result_str: str) -> str:
-        prompt = f"""
-用户问题: {question}
-执行的SQL: {sql}
-查询结果:
-{result_str}
-
-请根据上述查询结果，以自然、流畅的语言回答用户问题。
-1. **数据解读**：直接基于查询结果回答。如果结果是列表且用户问数量，请手动统计行数并回答（例如"共找到 N 条记录..."）。
-2. **信息展示**：如果用户要求列出详情，请条理清晰地列出结果中的关键信息。
-3. **空结果处理**：如果结果为空，请友好地告知用户未找到符合条件的数据。
-4. **通用性**：请根据实际数据内容回答，不要假设数据一定是"人员"或"名单"，它可能是订单、产品、日志等任何业务实体。
-"""
+        prompt = Prompts.SQL_ANSWER.format(
+            question=question,
+            sql=sql,
+            result_str=result_str
+        )
         return self.llm.invoke(prompt).content

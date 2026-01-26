@@ -17,82 +17,6 @@ logger = logging.getLogger(__name__)
 # 开启 Ragas 的调试日志
 logging.getLogger("ragas").setLevel(logging.DEBUG)
 
-def batch_evaluate(agent: RAGAgent):
-    """
-    批量评估模式
-    """
-    print("\n=== 批量评估模式 ===")
-    print("请输入测试集 JSON 文件路径 (格式: [{'question': '...', 'ground_truth': '...'}, ...])")
-    print("或者直接回车使用默认内置测试用例。")
-    
-    test_file = input("路径: ").strip()
-    
-    test_data = []
-    if test_file and Path(test_file).exists():
-        try:
-            with open(test_file, 'r', encoding='utf-8') as f:
-                test_data = json.load(f)
-        except Exception as e:
-            logger.error(f"加载测试集失败: {e}")
-            return
-    else:
-        # 默认测试用例
-        print("使用默认测试用例...")
-        test_data = [
-            {"question": "李嘉敏是哪个部门的？", "ground_truth": "李嘉敏在开发部。"},
-            {"question": "销售部有哪些人？", "ground_truth": "销售部有张三和李四。"}
-        ]
-    
-    print(f"开始评估 {len(test_data)} 条用例...")
-    
-    results = []
-    count = 0
-    for item in test_data:
-        count += 1
-        q = item.get("question")
-        gt = item.get("ground_truth")
-        print(f"\nEvaluating: {q}")
-        
-        # 调用 chat 
-        res = agent.chat(q, session_id=f"eval_{time.time()}_{count}", ground_truth=gt)
-        
-        # 收集结果
-        eval_metrics = res.get("evaluation", {})
-        
-        # Handle different return types if needed, but RagasEvaluator returns dict now
-        eval_dict = eval_metrics
-
-        results.append({
-            "question": q,
-            "answer": res["answer"],
-            "ground_truth": gt,
-            "metrics": eval_dict
-        })
-        
-        print(f"Answer: {res['answer']}")
-        print(f"Metrics: {eval_dict}")
-    
-    # 汇总报告
-    print("\n" + "="*50)
-    print("=== 评估汇总报告 ===")
-    avg_scores = {}
-    valid_count = 0
-    for r in results:
-        metrics = r["metrics"]
-        if not metrics: continue
-        valid_count += 1
-        for k, v in metrics.items():
-            if isinstance(v, (int, float)):
-                avg_scores[k] = avg_scores.get(k, 0) + v
-    
-    if valid_count > 0:
-        for k in avg_scores:
-            avg_scores[k] /= valid_count
-            print(f"{k}: {avg_scores[k]:.4f}")
-    else:
-        print("无有效评估结果")
-    print("="*50)
-
 def main():
     agent = RAGAgent(scenario=DEFAULT_SCENARIO)
     
@@ -100,16 +24,12 @@ def main():
     print(f"当前配置: K={RETRIEVAL_K}, Embedding={EMBEDDING_MODEL_NAME}")
     print("1. 初始化/更新知识库 (加载 JSON)")
     print("2. 智能问答模式 (Auto Route: SQL/RAG)")
-    print("3. 批量评估 (Batch Eval)")
     
     choice = input("请选择 (默认2): ").strip()
     
     if choice == "1":
         agent.reload_data(JSON_DATA_PATH)
         print("知识库加载完成！")
-    elif choice == "3":
-        batch_evaluate(agent)
-        return
     
     session_id = f"user_{int(time.time())}"
     print(f"已创建新会话: {session_id}")
