@@ -1,14 +1,14 @@
 
 from typing import Dict, Any
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain.memory import ChatMessageHistory
 
 class SimpleMemory:
     """
-    基于 langchain_core 实现的简单对话内存，替代 ConversationBufferWindowMemory
+    基于 langchain 实现的简单对话内存，替代 ConversationBufferWindowMemory
     """
     def __init__(self, k=5):
-        self.chat_history = InMemoryChatMessageHistory()
+        self.chat_history = ChatMessageHistory()
         self.k = k
 
     def save_context(self, inputs: Dict[str, str], outputs: Dict[str, str]):

@@ -1,0 +1,6 @@
+chroma_db/
+node_modules/
+json_save/
+.vscode/
+.trae/
+__pycache__/

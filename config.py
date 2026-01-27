@@ -9,8 +9,8 @@ EMBEDDING_MODEL_NAME = "text-embedding-bge-m3"
 CHAT_MODEL_NAME = "qwen/qwen3-4b-2507"
 
 # 路径配置
-DB_PERSIST_DIR = r"D:\DM\LangChain\联络名单-Agent\chroma_db"
-MASTER_JSON_PATH = r"D:\DM\LangChain\联络名单-Agent\json_save\unified_data.json"
+DB_PERSIST_DIR = r"D:\DM\LangChain\联络名单-Agent\Quotation_agent\chroma_db"
+MASTER_JSON_PATH = r"D:\DM\LangChain\联络名单-Agent\Quotation_agent\json_save\unified_data.json"
 JSON_DATA_PATH = MASTER_JSON_PATH
 
 

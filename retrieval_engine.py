@@ -1,4 +1,3 @@
-
 import json
 import time
 import logging
@@ -8,7 +7,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from config import DB_PERSIST_DIR, ENABLE_RAGAS_EVALUATION
+from config import DB_PERSIST_DIR, ENABLE_RAGAS_EVALUATION, Prompts
 from logger_config import PhaseLogger
 
 logger = logging.getLogger(__name__)
@@ -103,46 +102,15 @@ class RetrievalEngine:
         """
         context_block = "\n".join([f"--- Doc {i+1} ---\n{txt}" for i, txt in enumerate(current_contexts)])
         
-        system_prompt = """
-你是一个智能检索助手。你的任务是判断提供的参考资料是否包含回答用户问题的完整信息。
-严格遵守以下规则：
-1. **禁止幻觉**：如果你在资料中找不到用户查询的确切ID、编号、姓名或关键词，**绝对不要**尝试猜测或使用仅仅是"看起来像"的数据，严禁强行关联。
-2. **多轮检索**：如果当前资料不足或不匹配，请优先选择 "SEARCH_MORE" 并生成新的查询词，而不是直接 "GIVE_UP"。只有当你确定换个词也搜不到（比如已尝试过多种变体）时才放弃。
-3. **精准匹配**：对于代码、订单号、款号等实体，必须精确匹配。
-        """
+        system_prompt = Prompts.RAG_JUDGMENT_SYSTEM
         
-        user_prompt = f"""
-[历史对话]
-{history if history else "无"}
-
-[用户问题]
-{question}
-
-[已累积的线索]
-{accumulated_clues if accumulated_clues else "无"}
-
-[当前批次参考资料]
-{context_block}
-
-请仔细分析并按以下格式输出之一：
-
-情况 1：资料足以完整回答问题
-STATUS: SOLVED
-CONTENT: [你的最终答案]
-
-情况 2：资料不足，需要进一步检索
-STATUS: SEARCH_MORE
-CLUES: [从当前资料中提取的新线索总结，如果无新线索填"无"]
-NEXT_QUERY: [用于查找缺失信息的新的搜索关键词，简短精确]
-
-情况 3：资料不足且无法构造有效的新查询（已尽力）
-STATUS: GIVE_UP
-CLUES: [总结已知信息]
-
-注意：
-- NEXT_QUERY 应该是针对缺失信息的具体关键词（例如"营运部 人员名单" 或 "张三 职位"）。
-- 不要再次搜索已经搜索过的词。
-"""
+        user_prompt = Prompts.RAG_JUDGMENT_USER.format(
+            history=history if history else "无",
+            question=question,
+            accumulated_clues=accumulated_clues if accumulated_clues else "无",
+            context_block=context_block
+        )
+        
         # --- 打印调试日志 ---
         logger.info(f"\n{'='*20} ROUND JUDGMENT START {'='*20}")
         # logger.info(f"Prompt:\n{user_prompt.strip()}") # 减少日志量
@@ -212,8 +180,16 @@ CLUES: [总结已知信息]
         current_query = question
         is_solved = False
         
+        trace_steps = []  # 记录每轮详细信息
+
         for round_idx in range(MAX_ROUNDS):
             round_key = f"第{round_idx+1}轮"
+            step_info = {
+                "round": round_idx + 1,
+                "query": current_query,
+                "retrieved_docs": [],
+                "llm_judgment": {}
+            }
             
             with self.phase_logger.phase(f"{round_key}_总流程"):
                 logger.info(f"Round {round_idx+1}: Searching for '{current_query}'...")
@@ -234,6 +210,10 @@ CLUES: [总结已知信息]
                 
                 if not current_batch_docs:
                     logger.info(f"Round {round_idx+1}: No new documents found.")
+                    step_info["retrieved_docs"] = []
+                    step_info["llm_judgment"] = {"status": "NO_DOCS", "note": "No new documents found"}
+                    trace_steps.append(step_info)
+                    
                     # 如果没有新文档，尝试强行让LLM基于现有信息总结，或者停止
                     if round_idx == 0:
                          return self._fallback_response("根据知识库内容无法提供回答", self.phase_logger.get_timings())
@@ -243,11 +223,13 @@ CLUES: [总结已知信息]
                 current_contexts = []
                 for doc in current_batch_docs:
                     current_contexts.append(doc.page_content)
-                    used_sources.append({
+                    doc_info = {
                         "doc_id": doc.metadata.get("doc_id"),
                         "chunk_id": doc.metadata.get("chunk_id"),
                         "content": doc.page_content
-                    })
+                    }
+                    used_sources.append(doc_info)
+                    step_info["retrieved_docs"].append(doc_info)
                 
                 # 3. LLM 判断与规划
                 with self.phase_logger.phase(f"{round_key}_判读"):
@@ -255,6 +237,13 @@ CLUES: [总结已知信息]
                         question, accumulated_clues, current_contexts, history
                     )
                 
+                step_info["llm_judgment"] = {
+                    "status": status,
+                    "clues": output_content,
+                    "next_query": next_query
+                }
+                trace_steps.append(step_info)
+
                 if status == "SOLVED":
                     logger.info(f"Round {round_idx+1}: Answer found!")
                     final_answer = output_content
@@ -297,7 +286,8 @@ CLUES: [总结已知信息]
             "answer": final_answer,
             "sources": used_sources,
             "evaluation": evaluation_result,
-            "timing": self.phase_logger.get_timings()
+            "timing": self.phase_logger.get_timings(),
+            "trace": trace_steps
         }
 
     def _generate_final_summary(self, question, clues, history: str = ""):
@@ -314,5 +304,6 @@ CLUES: [总结已知信息]
             "answer": msg,
             "sources": [],
             "evaluation": {},
-            "timing": timing
+            "timing": timing,
+            "trace": []
         }

@@ -1,17 +1,22 @@
-
 import logging
 from typing import List, Dict, Any
-from ragas import evaluate
-from ragas.metrics import (
-    Faithfulness,
-    AnswerRelevancy,
-    ContextPrecision,
-    ContextRecall,
-    AnswerCorrectness
-)
-from datasets import Dataset
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ragas import evaluate
+    from ragas.metrics import (
+        Faithfulness,
+        AnswerRelevancy,
+        ContextPrecision,
+        ContextRecall,
+        AnswerCorrectness
+    )
+    from datasets import Dataset
+    RAGAS_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"Ragas or dependencies not available, evaluation will be disabled. Error: {e}")
+    RAGAS_AVAILABLE = False
 
 class RagasEvaluator:
     """
@@ -20,18 +25,24 @@ class RagasEvaluator:
     def __init__(self, llm, embeddings):
         self.llm = llm
         self.embeddings = embeddings
-        # 配置 ragas 使用的 metrics
-        self.metrics = [
-            Faithfulness(),
-            AnswerRelevancy(),
-            # ContextPrecision(), 
-            # AnswerCorrectness() 
-        ]
+        if RAGAS_AVAILABLE:
+            # 配置 ragas 使用的 metrics
+            self.metrics = [
+                Faithfulness(),
+                AnswerRelevancy(),
+                # ContextPrecision(), 
+                # AnswerCorrectness() 
+            ]
+        else:
+            self.metrics = []
         
     def evaluate_single(self, question: str, answer: str, contexts: List[str], ground_truth: str = None) -> Dict[str, float]:
         """
         对单次问答进行评估
         """
+        if not RAGAS_AVAILABLE:
+            return {}
+
         data_dict = {
             "question": [question],
             "answer": [answer],

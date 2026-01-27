@@ -1,16 +1,18 @@
-
 import time
 import logging
 from typing import Dict, Any
 
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+# from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_openai import ChatOpenAI
+from custom_embeddings import CustomOpenAIEmbeddings
 
 from config import (
     EMBEDDING_MODEL_NAME,
     CHAT_MODEL_NAME,
     LM_STUDIO_API_BASE,
     LM_STUDIO_API_KEY,
-    JSON_DATA_PATH
+    JSON_DATA_PATH,
+    Prompts
 )
 from memory import SimpleMemory
 from evaluator import RagasEvaluator
@@ -32,11 +34,10 @@ class RAGAgent:
         
         with self.phase_logger.phase("初始化"):
             # 1. Initialize Models
-            self.embeddings = OpenAIEmbeddings(
+            self.embeddings = CustomOpenAIEmbeddings(
                 model=EMBEDDING_MODEL_NAME,
                 openai_api_base=LM_STUDIO_API_BASE,
-                openai_api_key=LM_STUDIO_API_KEY,
-                check_embedding_ctx_length=False 
+                openai_api_key=LM_STUDIO_API_KEY
             )
             
             self.llm = ChatOpenAI(
@@ -125,14 +126,41 @@ class RAGAgent:
         final_result = {}
         success = False
         
+        # Trace logs
+        trace_log = []
+        trace_log.append({
+            "step": "Intent Recognition",
+            "details": {
+                "initial_intent": initial_intent,
+                "history_used": history_str
+            }
+        })
+
         for attempt, current_intent in enumerate(strategy_queue):
             logger.info(f"Attempt {attempt + 1}: Executing {current_intent} strategy...")
             
+            step_trace = {
+                "step": f"Strategy Execution (Attempt {attempt + 1})",
+                "strategy": current_intent,
+                "details": {}
+            }
+
             if current_intent == "SQL":
                 result = self._execute_sql(question, history_str)
+                step_trace["details"] = {
+                    "type": "SQL",
+                    "sql_query": result.get("sql_query"),
+                    "raw_result": result.get("raw_result")
+                }
             else:
                 result = self._execute_rag(question, history_str, ground_truth)
-                
+                step_trace["details"] = {
+                    "type": "RAG",
+                    "rag_trace": result.get("trace", [])
+                }
+            
+            trace_log.append(step_trace)
+
             # 记录耗时
             self.phase_logger.timings.update(result.get("timing", {}))
             
@@ -155,6 +183,9 @@ class RAGAgent:
         t_end = time.time()
         if "timing" not in final_result: final_result["timing"] = {}
         final_result["timing"]["total_ms"] = round((t_end - t_start) * 1000, 2)
+        
+        # 将 trace_log 添加到最终结果
+        final_result["trace_log"] = trace_log
         
         return final_result
 

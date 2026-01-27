@@ -6,6 +6,7 @@ from typing import Dict, Any
 from pathlib import Path
 from sqlalchemy import create_engine, text
 
+from config import Prompts
 from logger_config import PhaseLogger
 
 logger = logging.getLogger(__name__)
