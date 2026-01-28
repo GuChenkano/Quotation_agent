@@ -1,6 +1,7 @@
 import json
 import time
 import logging
+import re
 from typing import List, Dict, Any, Tuple
 from pathlib import Path
 from langchain_community.vectorstores import Chroma
@@ -152,11 +153,17 @@ class RetrievalEngine:
                 # 解析 CLUES 和 NEXT_QUERY
                 clues_part = ""
                 query_part = ""
+                relevant_docs_indices = []
                 
                 lines = content.split('\n')
                 current_section = None
                 for line in lines:
-                    if "CLUES:" in line:
+                    if "RELEVANT_DOCS:" in line:
+                        doc_str = line.split("RELEVANT_DOCS:", 1)[1].strip()
+                        matches = re.findall(r"Doc\s*(\d+)", doc_str, re.IGNORECASE)
+                        relevant_docs_indices = [int(m)-1 for m in matches if m.isdigit()]
+                        current_section = "RELEVANT"
+                    elif "CLUES:" in line:
                         clues_part = line.split("CLUES:", 1)[1].strip()
                         current_section = "CLUES"
                     elif "NEXT_QUERY:" in line:
@@ -166,6 +173,7 @@ class RetrievalEngine:
                         clues_part += " " + line.strip()
                     # QUERY通常只有一行
                 
+                debug_info["relevant_indices"] = relevant_docs_indices
                 return "SEARCH_MORE", clues_part, query_part, debug_info
             
             else:
@@ -192,6 +200,7 @@ class RetrievalEngine:
         final_answer = ""
         used_sources = []
         seen_chunk_ids = set()
+        all_relevant_chunks = []
         
         current_query = question
         is_solved = False
@@ -298,8 +307,19 @@ class RetrievalEngine:
                 
                 elif status == "SEARCH_MORE":
                     logger.info(f"Round {round_idx+1}: Need more info. Next Query: '{next_query}'")
-                    if output_content and "无新线索" not in output_content:
-                        accumulated_clues += f"\n[Round {round_idx+1} Clues]: {output_content}"
+                    
+                    # Update accumulated chunks based on relevant indices
+                    relevant_indices = debug_info.get("relevant_indices", [])
+                    added_count = 0
+                    for idx in relevant_indices:
+                        if 0 <= idx < len(current_contexts):
+                            chunk_text = current_contexts[idx]
+                            if chunk_text not in all_relevant_chunks:
+                                all_relevant_chunks.append(chunk_text)
+                                added_count += 1
+                    
+                    if all_relevant_chunks:
+                        accumulated_clues = "\n".join([f"--- Accumulated Doc {i+1} ---\n{txt}" for i, txt in enumerate(all_relevant_chunks)])
                     
                     if next_query and len(next_query.strip()) > 1:
                         current_query = next_query
@@ -308,9 +328,7 @@ class RetrievalEngine:
                         break
                 
                 else: # GIVE_UP
-                    logger.info("Round {round_idx+1}: LLM decided to give up searching.")
-                    if output_content:
-                        accumulated_clues += f"\n[Round {round_idx+1} Clues]: {output_content}"
+                    logger.info(f"Round {round_idx+1}: LLM decided to give up searching.")
                     break
         
         if not is_solved:

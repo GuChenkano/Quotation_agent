@@ -263,33 +263,14 @@ class StructuredQueryEngine:
             return []
 
     def _generate_sql(self, question: str, history: str = "", hint: str = "") -> str:
-        prompt = f"""
-你是一个智能SQL生成专家。你的任务是根据用户的自然语言问题，结合表结构信息，生成准确的SQLite查询语句。
-
-当前场景数据表信息：
-- 表名: {self.table_name}
-- 可用列名 (Schema): {self.columns}
-
-[历史对话]
-{history if history else "无"}
-
-用户问题: {question}
-
-{hint}
-
-生成规则：
-1. **字段映射**：请仔细分析用户问题中的业务术语，并将其映射到最匹配的数据库列名。例如，用户说"部门"可能对应 `dept_name` 或 `department`，"产品"可能对应 `prod_name`。
-2. **查询策略**：
-   - **明细查询**：如果用户询问"哪些"、"谁"、"列出"、"详细信息"或特定属性（如"价格大于100的订单"），请**查询具体的列**（选择最能代表实体信息的列，如姓名、名称、ID等），不要使用 COUNT(*)。
-   - **统计查询**：仅当用户明确只询问"数量"、"多少个"（如"有多少人"、"总销量是多少"）且不需要具体名单时，才使用 COUNT(*) 或 SUM() 等聚合函数。
-   - **混合查询**：如果用户同时询问数量和详情（如"有多少个异常订单，列出来"），请**只查询具体数据列**。后续步骤会负责统计数量。
-3. **语法规范**：
-   - 仅返回纯文本 SQL 语句，不要使用 Markdown 格式（不要 ```sql）。
-   - 使用标准 SQLite 语法。
-   - 模糊搜索请使用 `LIKE '%keyword%'`。
-
-SQL语句:
-"""
+        prompt = Prompts.SQL_GENERATION.format(
+            table_name=self.table_name,
+            columns=self.columns,
+            history=history if history else "无",
+            question=question,
+            hint=hint
+        )
+        
         # 记录输入
         logger.info(f"[StructuredQueryEngine] - LLM SQL生成输入: 问题=\"{question}\", 候选字段提示=\"{hint}\", 表结构={self.columns}")
         
