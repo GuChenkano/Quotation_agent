@@ -65,6 +65,22 @@ class RAGAgent:
 
             # 3. Memory Management
             self.sessions: Dict[str, SimpleMemory] = {}
+            
+            # 4. 自动数据初始化检查
+            # 检查向量库是否为空，如果为空则自动加载数据
+            try:
+                # 获取集合中的文档数量
+                count = self.retrieval_engine.vector_store._collection.count()
+                if count == 0:
+                    logger.warning(f"检测到向量库为空 (count=0)，正在自动从 {self.json_path} 加载数据...")
+                    if self.json_path:
+                        self.retrieval_engine.ingest_data(self.json_path)
+                    else:
+                        logger.error("未指定 JSON 数据路径，无法执行自动入库。")
+                else:
+                    logger.info(f"向量库健康检查通过，当前文档总数: {count}")
+            except Exception as e:
+                logger.error(f"向量库自动检查/初始化失败: {e}")
 
     def get_memory(self, session_id: str) -> SimpleMemory:
         """获取或创建指定会话的内存"""
@@ -95,6 +111,10 @@ class RAGAgent:
             try:
                 response = self.llm.invoke(prompt)
                 intent = response.content.strip().upper()
+                
+                logger.info(f"[RAGAgent] - LLM意图识别输入: \"{question}\"")
+                logger.info(f"[RAGAgent] - LLM意图识别输出: 意图=\"{intent}\", 置信度=\"未知\"")
+                
                 if "SQL" in intent: return "SQL"
                 return "RAG"
             except Exception as e:
@@ -173,6 +193,28 @@ class RAGAgent:
                 break
             else:
                 logger.warning(f"Strategy {current_intent} failed to provide a valid answer.")
+                
+                if current_intent == "RAG":
+                     # 尝试从 result 中提取更具体的失败信息，或者使用通用描述
+                     # 在 RAG 失败时，通常是因为 "根据知识库内容无法提供回答"
+                     # 我们需要判断是否是因为检索结果为 0。
+                     # 我们可以检查 result 的 timing 是否很短，或者查看 trace（如果有）。
+                     # 但最直接的是看 result['answer'] 是否是默认的失败消息。
+                     rag_trace = result.get("trace", [])
+                     is_no_docs = False
+                     if rag_trace and len(rag_trace) > 0:
+                         first_step = rag_trace[0]
+                         if first_step.get("llm_judgment", {}).get("status") == "NO_DOCS":
+                             is_no_docs = True
+                     
+                     timing_ms = result.get("timing", {}).get("total_ms", 0)
+                     
+                     if is_no_docs:
+                         logger.warning(f"[agent] - RAG失败根因: 检索阶段返回0文档（耗时{timing_ms}ms），未进入生成阶段")
+                         
+                     if attempt < len(strategy_queue) - 1:
+                         logger.info(f"[agent] - 触发策略回退: RAG检索结果为空，启用备用SQL策略")
+                
                 final_result = result # 保留失败结果，以防万一
                 # 如果这是最后一次尝试，最终结果就是这个失败的
                 

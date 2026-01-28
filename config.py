@@ -170,20 +170,21 @@ CLUES: [总结已知信息]
 2. **语义映射**：在列名列表中寻找与提取出的实体在语义上高度相关、存在包含关系或同义关系的字段。
    - 优先匹配：完全匹配 > 同义词/缩写匹配 > 语义相关 > 模糊匹配。
    - 跨域适应：请基于列名的字面意义和通用语义进行推理，不要局限于特定行业术语。
-3. **排序输出**：将候选列名按置信度从高到低排序。
+3. **理由说明**：简要说明匹配的依据。
 
 [输出规范]
-- 必须且仅返回一个纯 JSON 字符串列表。
+- 必须且仅返回一个纯 JSON 对象。
+- 格式：{{"candidates": ["列名1", "列名2"], "reason": "匹配理由"}}
 - 严禁包含 Markdown 格式（如 ```json）、解释性文字或换行符。
 - 如果用户查询中未包含任何具体的筛选实体，或无法找到任何相关列名，请返回空列表 []。
 
 [示例]
 Input: "查找所有状态为活跃的用户" (Columns: ["user_status", "name", "id"])
-Output: ["user_status"]
+Output: {{"candidates": ["user_status"], "reason": "用户提到的'状态'语义映射到字段 'user_status'"}}
 
 Input: "Show me details about Project Alpha" (Columns: ["proj_name", "description", "manager"])
-Output: ["proj_name", "description"]
+Output: {{"candidates": ["proj_name", "description"], "reason": "Project Alpha implies filtering by project name"}}
 
 Input: "统计总数" (无明确筛选实体)
-Output: []
+Output: {{"candidates": [], "reason": "无明确筛选实体"}}
 """

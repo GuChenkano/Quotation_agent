@@ -125,6 +125,8 @@ class StructuredQueryEngine:
 
         final_sql = None
         final_result_str = None
+        final_row_count = 0
+        final_keys = []
         last_error = None
         sql_attempts = [] # 记录所有尝试的详细信息
         
@@ -172,6 +174,9 @@ class StructuredQueryEngine:
                             # 采纳此结果
                             final_sql = sql_query
                             final_result_str = result_str
+                            final_row_count = len(rows)
+                            final_keys = list(keys)
+                            
                             attempt_info["result"] = result_str
                             attempt_info["status"] = "SUCCESS"
                             sql_attempts.append(attempt_info)
@@ -184,6 +189,8 @@ class StructuredQueryEngine:
                             if final_sql is None: # 保留第一个空结果作为保底
                                 final_sql = sql_query
                                 final_result_str = "查询结果为空。"
+                                final_row_count = 0
+                                final_keys = list(keys)
                             
                             attempt_info["result"] = "Empty Result"
                             attempt_info["status"] = "EMPTY"
@@ -210,7 +217,7 @@ class StructuredQueryEngine:
 
         # 4. 生成自然语言回答
         with self.phase_logger.phase("生成回答"):
-            final_answer = self._generate_answer(question, final_sql, final_result_str)
+            final_answer = self._generate_answer(question, final_sql, final_result_str, final_row_count, final_keys)
             
         return {
             "answer": final_answer, 
@@ -221,6 +228,8 @@ class StructuredQueryEngine:
 
     def _analyze_columns(self, question: str) -> list:
         """调用 LLM 分析问题并返回候选字段列表"""
+        logger.info(f"[StructuredQueryEngine] - LLM字段匹配输入: 问题=\"{question}\", 表=\"{self.table_name}\", 列名={self.columns}")
+        
         prompt = Prompts.COLUMN_MATCHING.format(
             table_name=self.table_name,
             columns=self.columns,
@@ -230,11 +239,25 @@ class StructuredQueryEngine:
         content = response.content.strip()
         # 清理可能的 markdown 格式
         content = content.replace("```json", "").replace("```", "").strip()
+        
         try:
-            candidates = json.loads(content)
-            if isinstance(candidates, list):
-                return candidates
-            return []
+            result = json.loads(content)
+            candidates = []
+            reason = "无"
+            
+            if isinstance(result, dict):
+                candidates = result.get("candidates", [])
+                reason = result.get("reason", "无")
+            elif isinstance(result, list):
+                # 兼容旧格式
+                candidates = result
+                reason = "兼容旧格式直接返回列表"
+            
+            # 截断理由如果太长（虽然不太可能，但保持一致性）
+            log_reason = reason[:500] + "[...截断]" if len(reason) > 500 else reason
+            logger.info(f"[StructuredQueryEngine] - LLM字段匹配输出: 候选字段={candidates}, 理由=\"{log_reason}\"")
+            
+            return candidates
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse column candidates JSON: {content}")
             return []
@@ -267,16 +290,34 @@ class StructuredQueryEngine:
 
 SQL语句:
 """
+        # 记录输入
+        logger.info(f"[StructuredQueryEngine] - LLM SQL生成输入: 问题=\"{question}\", 候选字段提示=\"{hint}\", 表结构={self.columns}")
+        
         response = self.llm.invoke(prompt)
         sql = response.content.strip()
         # 清理可能存在的markdown标记
         sql = sql.replace("```sql", "").replace("```", "").strip()
+        
+        # 记录输出
+        log_sql = sql[:500] + "[...截断]" if len(sql) > 500 else sql
+        logger.info(f"[StructuredQueryEngine] - LLM生成的SQL查询语句如下: {log_sql}")
+        
         return sql
 
-    def _generate_answer(self, question: str, sql: str, result_str: str) -> str:
+    def _generate_answer(self, question: str, sql: str, result_str: str, row_count: int = 0, key_fields: list = None) -> str:
+        # 记录输入
+        key_fields_str = ", ".join(str(k) for k in key_fields) if key_fields else "无"
+        logger.info(f"[StructuredQueryEngine] - LLM回答生成输入: 问题=\"{question}\", SQL结果摘要=\"共{row_count}行，包含字段: {key_fields_str}\"")
+        
         prompt = Prompts.SQL_ANSWER.format(
             question=question,
             sql=sql,
             result_str=result_str
         )
-        return self.llm.invoke(prompt).content
+        content = self.llm.invoke(prompt).content
+        
+        # 记录输出
+        log_content = content[:500] + "[...截断]" if len(content) > 500 else content
+        logger.info(f"[StructuredQueryEngine] - LLM生成的回答: \"{log_content}\"")
+        
+        return content

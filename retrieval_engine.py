@@ -116,6 +116,10 @@ class RetrievalEngine:
         # --- 打印调试日志 ---
         logger.info(f"\n{'='*20} ROUND JUDGMENT START {'='*20}")
         
+        # 记录 LLM 输入
+        retrieved_docs_summary = ", ".join([f"Doc{i+1}" for i in range(len(current_contexts))])
+        logger.info(f"[RetrievalEngine] - LLM RAG生成输入: 问题=\"{question}\", 检索文档={retrieved_docs_summary}")
+
         start_time = time.time()
         try:
             response = self.llm.invoke([
@@ -124,6 +128,10 @@ class RetrievalEngine:
             ])
             end_time = time.time()
             content = response.content.strip()
+            
+            # 记录 LLM 输出 (截断)
+            log_content = content[:500] + "[...截断]" if len(content) > 500 else content
+            logger.info(f"[RetrievalEngine] - LLM RAG生成输出: \"{log_content}\"")
             
             debug_info = {
                 "full_prompt": full_prompt,
@@ -206,8 +214,19 @@ class RetrievalEngine:
                 
                 # 1. 检索 (带分数)
                 with self.phase_logger.phase(f"{round_key}_检索"):
+                    # 诊断日志：检查索引健康度和查询参数
+                    try:
+                        collection_count = self.vector_store._collection.count()
+                        logger.info(f"[RetrievalEngine] - 诊断: 当前向量库文档总数={collection_count}")
+                    except Exception as e:
+                        logger.warning(f"[RetrievalEngine] - 诊断: 无法获取向量库计数: {e}")
+                        
+                    logger.info(f"[RetrievalEngine] - 诊断: 执行检索 params(k={BATCH_SIZE * 2}, query=\"{current_query}\")")
+                    
                     # 改用 similarity_search_with_score
                     docs_with_scores = self.vector_store.similarity_search_with_score(current_query, k=BATCH_SIZE * 2)
+                    
+                    logger.info(f"[RetrievalEngine] - 检索结果: 共找到{len(docs_with_scores)}个文档 | 查询=\"{current_query}\" | top_k={BATCH_SIZE * 2}")
                 
                 # 2. 去重与筛选
                 current_batch_docs = []
@@ -220,12 +239,14 @@ class RetrievalEngine:
                             break
                 
                 if not current_batch_docs:
+                    logger.info(f"[RetrievalEngine] - 检索失败原因: 无匹配文档（可能原因：查询语义模糊/索引缺失关键术语）")
                     logger.info(f"Round {round_idx+1}: No new documents found.")
                     step_info["retrieved_docs"] = []
                     step_info["llm_judgment"] = {"status": "NO_DOCS", "note": "No new documents found"}
                     trace_steps.append(step_info)
                     
                     if round_idx == 0:
+                         logger.info(f"[agent] - 跳过RAG生成: 检索结果为空，触发策略回退至SQL")
                          return self._fallback_response("根据知识库内容无法提供回答", self.phase_logger.get_timings())
                     break
                 
@@ -317,12 +338,21 @@ class RetrievalEngine:
 
     def _generate_final_summary(self, question, clues, history: str = ""):
         """当检索耗尽仍未找到确切答案时，基于线索总结"""
+        # 记录输入
+        logger.info(f"[RetrievalEngine] - LLM RAG生成输入: 问题=\"{question}\", 检索文档=基于累积线索总结")
+
         prompt = Prompts.RAG_SUMMARY.format(
             history=history if history else "无",
             question=question,
             clues=clues
         )
-        return self.llm.invoke(prompt).content
+        content = self.llm.invoke(prompt).content
+        
+        # 记录输出 (截断)
+        log_content = content[:500] + "[...截断]" if len(content) > 500 else content
+        logger.info(f"[RetrievalEngine] - LLM RAG生成输出: \"{log_content}\"")
+        
+        return content
 
     def _fallback_response(self, msg, timing):
         return {
