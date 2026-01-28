@@ -98,50 +98,148 @@ class StructuredQueryEngine:
 
     def query(self, question: str, history: str = "") -> Dict[str, Any]:
         """
-        Text-to-SQL 查询流程
+        Text-to-SQL 查询流程（优化版：支持智能字段匹配与试探性检索）
         """
         # Reset timings for this call
         self.phase_logger.timings = {}
         
-        # 1. 生成 SQL
-        with self.phase_logger.phase("生成SQL"):
-            sql_query = self._generate_sql(question, history)
-            
-        if not sql_query:
-            return {"answer": "无法生成有效的SQL查询。", "sql": None}
-            
-        # 2. 执行 SQL
-        try:
-            with self.phase_logger.phase("执行SQL"):
-                with self.engine.connect() as conn:
-                    result = conn.execute(text(sql_query))
-                    rows = result.fetchall()
-                    # 获取列名
-                    keys = result.keys()
-                    
-                    # 格式化结果
-                    result_str = ""
-                    if not rows:
-                        result_str = "查询结果为空。"
-                    else:
-                        result_str = f"SQL查询结果:\n"
-                        # 简单表格展示
-                        result_str += " | ".join(keys) + "\n"
-                        result_str += "-" * 20 + "\n"
-                        for row in rows:
-                            result_str += " | ".join([str(x) for x in row]) + "\n"
-                        
-            # 3. 生成自然语言回答
-            with self.phase_logger.phase("生成回答"):
-                final_answer = self._generate_answer(question, sql_query, result_str)
-                
-            return {"answer": final_answer, "sql": sql_query, "raw_result": result_str}
-            
-        except Exception as e:
-            logger.error(f"SQL执行失败: {e}")
-            return {"answer": f"SQL执行出错: {e}", "sql": sql_query}
+        # 0. 调试信息：打印所有可用字段
+        logger.info(f"当前数据表 '{self.table_name}' 的所有列名: {self.columns}")
 
-    def _generate_sql(self, question: str, history: str = "") -> str:
+        # 1. 字段匹配分析
+        candidate_columns = []
+        with self.phase_logger.phase("字段匹配分析"):
+            try:
+                candidate_columns = self._analyze_columns(question)
+                logger.info(f"LLM 推荐的候选字段: {candidate_columns}")
+            except Exception as e:
+                logger.warning(f"字段分析失败: {e}")
+        
+        # 如果没有推荐字段，默认执行一次无Hint的生成
+        if not candidate_columns:
+            candidate_columns = [None]
+        else:
+            # 确保候选字段是唯一的，并且在 self.columns 中（可选，也可以允许模糊匹配交由SQL处理）
+            # 这里我们只去重
+            candidate_columns = list(dict.fromkeys(candidate_columns))
+
+        final_sql = None
+        final_result_str = None
+        last_error = None
+        sql_attempts = [] # 记录所有尝试的详细信息
+        
+        # 2. 多字段试探性检索
+        for attempt, col_hint in enumerate(candidate_columns):
+            hint_msg = ""
+            if col_hint:
+                hint_msg = f"注意：问题中的实体可能对应数据库表中的字段 `{col_hint}`，请优先使用该字段进行查询。"
+                
+            logger.info(f"Attempt {attempt+1}: Generating SQL with hint column '{col_hint}'...")
+            
+            attempt_info = {
+                "attempt": attempt + 1,
+                "hint_column": col_hint,
+                "sql": None,
+                "result": None,
+                "status": "FAILED"
+            }
+            
+            with self.phase_logger.phase(f"生成SQL_尝试{attempt+1}"):
+                sql_query = self._generate_sql(question, history, hint=hint_msg)
+                attempt_info["sql"] = sql_query
+            
+            if not sql_query:
+                sql_attempts.append(attempt_info)
+                continue
+                
+            # 执行 SQL
+            try:
+                with self.phase_logger.phase(f"执行SQL_尝试{attempt+1}"):
+                    with self.engine.connect() as conn:
+                        result = conn.execute(text(sql_query))
+                        rows = result.fetchall()
+                        keys = result.keys()
+                        
+                        # 结果评估机制
+                        if rows:
+                            # 成功且有数据
+                            result_str = f"SQL查询结果:\n"
+                            result_str += " | ".join(keys) + "\n"
+                            result_str += "-" * 20 + "\n"
+                            for row in rows:
+                                result_str += " | ".join([str(x) for x in row]) + "\n"
+                            
+                            # 采纳此结果
+                            final_sql = sql_query
+                            final_result_str = result_str
+                            attempt_info["result"] = result_str
+                            attempt_info["status"] = "SUCCESS"
+                            sql_attempts.append(attempt_info)
+                            
+                            logger.info(f"SQL 尝试成功 (Hint: {col_hint}): Found {len(rows)} rows.")
+                            break # 找到有效结果，停止尝试
+                        else:
+                            # 结果为空，继续尝试下一个字段
+                            logger.info(f"SQL 尝试返回空结果 (Hint: {col_hint}). Trying next candidate...")
+                            if final_sql is None: # 保留第一个空结果作为保底
+                                final_sql = sql_query
+                                final_result_str = "查询结果为空。"
+                            
+                            attempt_info["result"] = "Empty Result"
+                            attempt_info["status"] = "EMPTY"
+                            sql_attempts.append(attempt_info)
+                            
+            except Exception as e:
+                logger.warning(f"SQL 尝试执行报错 (Hint: {col_hint}): {e}")
+                last_error = e
+                attempt_info["error"] = str(e)
+                sql_attempts.append(attempt_info)
+                # 继续尝试下一个
+        
+        # 3. 最终结果处理
+        if not final_sql:
+            return {
+                "answer": f"无法生成有效的SQL查询或所有尝试均失败。Last Error: {last_error}", 
+                "sql": None,
+                "raw_result": None,
+                "sql_attempts": sql_attempts
+            }
+            
+        if not final_result_str:
+            final_result_str = "查询结果为空。"
+
+        # 4. 生成自然语言回答
+        with self.phase_logger.phase("生成回答"):
+            final_answer = self._generate_answer(question, final_sql, final_result_str)
+            
+        return {
+            "answer": final_answer, 
+            "sql": final_sql, 
+            "raw_result": final_result_str,
+            "sql_attempts": sql_attempts # 返回详细尝试记录供 Trace 使用
+        }
+
+    def _analyze_columns(self, question: str) -> list:
+        """调用 LLM 分析问题并返回候选字段列表"""
+        prompt = Prompts.COLUMN_MATCHING.format(
+            table_name=self.table_name,
+            columns=self.columns,
+            question=question
+        )
+        response = self.llm.invoke(prompt)
+        content = response.content.strip()
+        # 清理可能的 markdown 格式
+        content = content.replace("```json", "").replace("```", "").strip()
+        try:
+            candidates = json.loads(content)
+            if isinstance(candidates, list):
+                return candidates
+            return []
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse column candidates JSON: {content}")
+            return []
+
+    def _generate_sql(self, question: str, history: str = "", hint: str = "") -> str:
         prompt = f"""
 你是一个智能SQL生成专家。你的任务是根据用户的自然语言问题，结合表结构信息，生成准确的SQLite查询语句。
 
@@ -153,6 +251,8 @@ class StructuredQueryEngine:
 {history if history else "无"}
 
 用户问题: {question}
+
+{hint}
 
 生成规则：
 1. **字段映射**：请仔细分析用户问题中的业务术语，并将其映射到最匹配的数据库列名。例如，用户说"部门"可能对应 `dept_name` 或 `department`，"产品"可能对应 `prod_name`。

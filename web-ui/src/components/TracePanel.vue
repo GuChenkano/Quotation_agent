@@ -83,15 +83,45 @@ const getStepStatus = (_step: any) => {
 
                 <!-- SQL Strategy -->
                 <div v-if="step.details.type === 'SQL'" class="space-y-3">
-                  <div>
+                  
+                  <!-- Final Result -->
+                  <div v-if="step.details.sql_query && !step.details.sql_attempts">
                     <div class="text-gray-500 mb-1">Generated SQL:</div>
                     <div class="bg-gray-800 text-green-400 p-2 rounded font-mono overflow-x-auto">
                       {{ step.details.sql_query }}
                     </div>
-                  </div>
-                  <div>
-                    <div class="text-gray-500 mb-1">Raw Result:</div>
+                    <div class="mt-2 text-gray-500 mb-1">Raw Result:</div>
                     <pre class="bg-gray-100 p-2 rounded text-gray-600 overflow-x-auto">{{ step.details.raw_result }}</pre>
+                  </div>
+
+                  <!-- Iterative SQL Attempts -->
+                  <div v-if="step.details.sql_attempts && step.details.sql_attempts.length" class="space-y-4">
+                    <div v-for="(attempt, aIdx) in step.details.sql_attempts" :key="aIdx" class="border-l-2 pl-3" :class="attempt.status === 'SUCCESS' ? 'border-green-400' : 'border-gray-300'">
+                      <div class="flex items-center gap-2 mb-2">
+                        <span class="font-semibold text-gray-700">尝试 #{{ attempt.attempt }}</span>
+                        <el-tag size="small" :type="attempt.status === 'SUCCESS' ? 'success' : 'info'">
+                          {{ attempt.hint_column ? `字段: ${attempt.hint_column}` : '默认生成' }}
+                        </el-tag>
+                        <el-tag v-if="attempt.status === 'SUCCESS'" size="small" type="success" effect="dark">成功</el-tag>
+                        <el-tag v-else size="small" type="info">未命中</el-tag>
+                      </div>
+
+                      <div class="mb-2">
+                        <div class="text-[10px] text-gray-400 uppercase mb-0.5">SQL Query</div>
+                        <div class="bg-gray-800 text-green-400 p-2 rounded font-mono text-[10px] overflow-x-auto">
+                          {{ attempt.sql || '生成失败' }}
+                        </div>
+                      </div>
+
+                      <div v-if="attempt.result">
+                        <div class="text-[10px] text-gray-400 uppercase mb-0.5">Result</div>
+                        <pre class="bg-gray-50 p-2 rounded text-gray-600 text-[10px] overflow-x-auto border border-gray-100">{{ attempt.result }}</pre>
+                      </div>
+                      
+                      <div v-if="attempt.error" class="text-red-500 text-[10px] mt-1">
+                        Error: {{ attempt.error }}
+                      </div>
+                    </div>
                   </div>
                 </div>
 

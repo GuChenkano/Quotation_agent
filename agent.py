@@ -150,7 +150,8 @@ class RAGAgent:
                 step_trace["details"] = {
                     "type": "SQL",
                     "sql_query": result.get("sql_query"),
-                    "raw_result": result.get("raw_result")
+                    "raw_result": result.get("raw_result"),
+                    "sql_attempts": result.get("sql_attempts") # 传递详细的 SQL 尝试记录
                 }
             else:
                 result = self._execute_rag(question, history_str, ground_truth)
@@ -198,7 +199,8 @@ class RAGAgent:
             "evaluation": {}, 
             "timing": self.structured_engine.phase_logger.get_timings(),
             "raw_result": result_sql.get("raw_result"),
-            "sql_query": result_sql.get("sql")
+            "sql_query": result_sql.get("sql"),
+            "sql_attempts": result_sql.get("sql_attempts", [])
         }
 
     def _execute_rag(self, question, history, ground_truth):
