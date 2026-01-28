@@ -37,7 +37,7 @@ onMounted(() => {
     chatStore.messages.push({
       id: 'welcome',
       role: 'assistant',
-      content: '您好！我是智能业务助手。我可以帮您查询企业联络名单、合同信息，或者回答相关业务问题。\n\n试着问我："财务部有几个人？" 或 "李鹏飞是谁？"',
+      content: '您好！我是智能业务助手。我可以帮您查询企业联络名单、合同信息，或者回答相关业务问题。',
       timestamp: Date.now()
     })
   }

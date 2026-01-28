@@ -94,10 +94,10 @@ class RetrievalEngine:
                 logger.warning("没有解析到有效文档。")
 
 
-    def _process_batch_judgment(self, question: str, accumulated_clues: str, current_contexts: List[str], history: str = "") -> Tuple[str, str, str]:
+    def _process_batch_judgment(self, question: str, accumulated_clues: str, current_contexts: List[str], history: str = "") -> Tuple[str, str, str, Dict[str, Any]]:
         """
         LLM 判断：当前资料是否足以回答问题，如果不足则生成下一步检索计划
-        返回: (status, content/clues, next_query)
+        返回: (status, content/clues, next_query, debug_info)
         status: 'SOLVED' | 'SEARCH_MORE' | 'GIVE_UP'
         """
         context_block = "\n".join([f"--- Doc {i+1} ---\n{txt}" for i, txt in enumerate(current_contexts)])
@@ -111,16 +111,26 @@ class RetrievalEngine:
             context_block=context_block
         )
         
+        full_prompt = f"System:\n{system_prompt}\n\nUser:\n{user_prompt}"
+        
         # --- 打印调试日志 ---
         logger.info(f"\n{'='*20} ROUND JUDGMENT START {'='*20}")
-        # logger.info(f"Prompt:\n{user_prompt.strip()}") # 减少日志量
         
+        start_time = time.time()
         try:
             response = self.llm.invoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_prompt)
             ])
+            end_time = time.time()
             content = response.content.strip()
+            
+            debug_info = {
+                "full_prompt": full_prompt,
+                "llm_response": content,
+                "response_time_ms": round((end_time - start_time) * 1000, 2),
+                "context_strategy": "Direct Concatenation with History and Accumulated Clues"
+            }
             
             logger.info(f"LLM Response:\n{content}")
             logger.info(f"{'='*20} ROUND JUDGMENT END {'='*20}\n")
@@ -128,7 +138,7 @@ class RetrievalEngine:
             if "STATUS: SOLVED" in content:
                 parts = content.split("CONTENT:", 1)
                 answer = parts[1].strip() if len(parts) > 1 else content
-                return "SOLVED", answer, ""
+                return "SOLVED", answer, "", debug_info
             
             elif "STATUS: SEARCH_MORE" in content:
                 # 解析 CLUES 和 NEXT_QUERY
@@ -148,17 +158,17 @@ class RetrievalEngine:
                         clues_part += " " + line.strip()
                     # QUERY通常只有一行
                 
-                return "SEARCH_MORE", clues_part, query_part
+                return "SEARCH_MORE", clues_part, query_part, debug_info
             
             else:
                 # Fallback to GIVE_UP or partial clues
                 parts = content.split("CLUES:", 1)
                 clues = parts[1].strip() if len(parts) > 1 else "无新线索"
-                return "GIVE_UP", clues, ""
+                return "GIVE_UP", clues, "", debug_info
                 
         except Exception as e:
             logger.error(f"Batch judgment failed: {e}")
-            return "GIVE_UP", "Error in judgment", ""
+            return "GIVE_UP", "Error in judgment", "", {"error": str(e)}
 
     def iterative_search(self, question: str, history: str = "", ground_truth: str = None) -> Dict[str, Any]:
         """
@@ -169,8 +179,6 @@ class RetrievalEngine:
         
         MAX_ROUNDS = 5 # 动态检索比较慢，减少轮数
         BATCH_SIZE = 5 # 每次只看最相关的5个
-        
-        # logger.info(f"启动动态智能检索模式: Max {MAX_ROUNDS} rounds...") # REMOVED: Redundant log
         
         accumulated_clues = ""
         final_answer = ""
@@ -188,23 +196,26 @@ class RetrievalEngine:
                 "round": round_idx + 1,
                 "query": current_query,
                 "retrieved_docs": [],
-                "llm_judgment": {}
+                "llm_judgment": {},
+                "context_details": {}, # 新增上下文详情
+                "generation_details": {} # 新增生成详情
             }
             
             with self.phase_logger.phase(f"{round_key}_总流程"):
                 logger.info(f"Round {round_idx+1}: Searching for '{current_query}'...")
                 
-                # 1. 检索
+                # 1. 检索 (带分数)
                 with self.phase_logger.phase(f"{round_key}_检索"):
-                    docs = self.vector_store.similarity_search(current_query, k=BATCH_SIZE * 2) # 多取一些以便去重
+                    # 改用 similarity_search_with_score
+                    docs_with_scores = self.vector_store.similarity_search_with_score(current_query, k=BATCH_SIZE * 2)
                 
                 # 2. 去重与筛选
                 current_batch_docs = []
-                for doc in docs:
+                for doc, score in docs_with_scores:
                     chunk_id = doc.metadata.get("chunk_id")
                     if chunk_id not in seen_chunk_ids:
                         seen_chunk_ids.add(chunk_id)
-                        current_batch_docs.append(doc)
+                        current_batch_docs.append((doc, score))
                         if len(current_batch_docs) >= BATCH_SIZE:
                             break
                 
@@ -214,26 +225,27 @@ class RetrievalEngine:
                     step_info["llm_judgment"] = {"status": "NO_DOCS", "note": "No new documents found"}
                     trace_steps.append(step_info)
                     
-                    # 如果没有新文档，尝试强行让LLM基于现有信息总结，或者停止
                     if round_idx == 0:
                          return self._fallback_response("根据知识库内容无法提供回答", self.phase_logger.get_timings())
                     break
                 
                 # 记录来源
                 current_contexts = []
-                for doc in current_batch_docs:
+                for doc, score in current_batch_docs:
                     current_contexts.append(doc.page_content)
                     doc_info = {
                         "doc_id": doc.metadata.get("doc_id"),
                         "chunk_id": doc.metadata.get("chunk_id"),
-                        "content": doc.page_content
+                        "content": doc.page_content,
+                        "relevance_score": score, # 记录分数 (Chroma默认是L2距离，越小越相似; 或cosine距离)
+                        "metadata": doc.metadata
                     }
                     used_sources.append(doc_info)
                     step_info["retrieved_docs"].append(doc_info)
                 
                 # 3. LLM 判断与规划
                 with self.phase_logger.phase(f"{round_key}_判读"):
-                    status, output_content, next_query = self._process_batch_judgment(
+                    status, output_content, next_query, debug_info = self._process_batch_judgment(
                         question, accumulated_clues, current_contexts, history
                     )
                 
@@ -242,7 +254,20 @@ class RetrievalEngine:
                     "clues": output_content,
                     "next_query": next_query
                 }
+                
+                # 填充新增的详情字段
+                step_info["context_details"] = {
+                    "extracted_snippets_count": len(current_contexts),
+                    "strategy": debug_info.get("context_strategy", "Unknown"),
+                    "final_prompt": debug_info.get("full_prompt", "")
+                }
+                step_info["generation_details"] = {
+                    "full_response": debug_info.get("llm_response", ""),
+                    "response_time_ms": debug_info.get("response_time_ms", 0)
+                }
+
                 trace_steps.append(step_info)
+
 
                 if status == "SOLVED":
                     logger.info(f"Round {round_idx+1}: Answer found!")

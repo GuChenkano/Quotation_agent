@@ -156,14 +156,64 @@ const getStepStatus = (_step: any) => {
 
                       <!-- Docs -->
                       <div v-if="round.retrieved_docs.length">
-                        <div class="text-gray-500 mb-1">检索到的文档 ({{ round.retrieved_docs.length }}):</div>
+                        <div class="text-gray-500 mb-1 flex justify-between">
+                           <span>检索到的文档 ({{ round.retrieved_docs.length }}):</span>
+                           <span class="text-[10px] text-gray-400">Score越低越相似(L2)</span>
+                        </div>
                         <el-collapse accordion class="doc-collapse">
-                          <el-collapse-item v-for="(doc, dIdx) in round.retrieved_docs" :key="dIdx" :title="`Doc ${dIdx+1} (ID: ${doc.chunk_id})`">
-                            <div class="p-2 bg-gray-50 text-gray-600 rounded whitespace-pre-wrap">{{ doc.content }}</div>
+                          <el-collapse-item v-for="(doc, dIdx) in round.retrieved_docs" :key="dIdx">
+                             <template #title>
+                                <div class="flex justify-between w-full pr-2">
+                                  <span>Doc {{ dIdx+1 }} (ID: {{ doc.chunk_id }})</span>
+                                  <el-tag size="small" type="info" effect="plain">{{ doc.relevance_score ? doc.relevance_score.toFixed(4) : 'N/A' }}</el-tag>
+                                </div>
+                             </template>
+                            <div class="p-2 bg-gray-50 text-gray-600 rounded whitespace-pre-wrap text-xs font-mono">{{ doc.content }}</div>
+                            <div v-if="doc.metadata" class="mt-2 pt-2 border-t border-gray-200">
+                                <div class="text-[10px] text-gray-400 mb-1">Metadata:</div>
+                                <pre class="text-[10px] text-gray-500 overflow-x-auto">{{ JSON.stringify(doc.metadata, null, 2) }}</pre>
+                            </div>
                           </el-collapse-item>
                         </el-collapse>
                       </div>
                       <div v-else class="text-gray-400 italic">未找到新文档</div>
+
+                      <!-- Context & Generation Details -->
+                      <div class="mt-3 space-y-2">
+                        <!-- Context Info -->
+                        <div v-if="round.context_details" class="bg-purple-50 p-2 rounded border border-purple-100">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="text-purple-700 font-medium text-xs">上下文构建</span>
+                                <el-tag size="small" type="primary" effect="plain">{{ round.context_details.strategy }}</el-tag>
+                            </div>
+                            <div class="text-[10px] text-purple-600 mb-2">
+                                提取片段数: {{ round.context_details.extracted_snippets_count }}
+                            </div>
+                            
+                            <el-popover placement="right" :width="600" trigger="click">
+                                <template #reference>
+                                    <el-button link type="primary" size="small">查看完整 Prompt</el-button>
+                                </template>
+                                <div class="h-[400px] overflow-y-auto custom-scrollbar">
+                                    <pre class="whitespace-pre-wrap text-xs text-gray-700 bg-gray-50 p-2 rounded">{{ round.context_details.final_prompt }}</pre>
+                                </div>
+                            </el-popover>
+                        </div>
+
+                        <!-- Generation Info -->
+                        <div v-if="round.generation_details" class="bg-green-50 p-2 rounded border border-green-100">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="text-green-700 font-medium text-xs">响应生成</span>
+                                <span class="text-[10px] text-gray-500">{{ round.generation_details.response_time_ms }} ms</span>
+                            </div>
+                            <el-collapse accordion class="doc-collapse">
+                                <el-collapse-item title="查看完整响应内容">
+                                    <div class="p-2 bg-white text-gray-700 rounded whitespace-pre-wrap text-xs">{{ round.generation_details.full_response }}</div>
+                                </el-collapse-item>
+                            </el-collapse>
+                        </div>
+                      </div>
+
                     </div>
                   </div>
                   <div v-else class="text-gray-400">无 RAG 追踪详情</div>
